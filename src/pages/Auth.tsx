@@ -14,7 +14,7 @@ import { useEffect } from "react";
 
 const signUpSchema = z.object({
   email: z.string().trim().email("Invalid email").max(255),
-  password: z.string().min(8, "At least 8 characters").max(72),
+  password: z.string().min(6, "At least 6 characters").max(72),
   username: z.string().trim().min(3, "Min 3 chars").max(20).regex(/^[a-z0-9_]+$/, "Lowercase letters, numbers, _ only"),
 });
 const signInSchema = z.object({
@@ -124,7 +124,7 @@ export default function Auth() {
                 <Label htmlFor="su-pw">Password</Label>
                 <div className="relative">
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                  <Input id="su-pw" type="password" placeholder="At least 8 characters" className="pl-10"
+                  <Input id="su-pw" type="password" placeholder="At least 6 characters" className="pl-10"
                     value={signUp.password} onChange={(e) => setSignUp({ ...signUp, password: e.target.value })} />
                 </div>
               </div>
