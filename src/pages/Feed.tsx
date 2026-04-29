@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/providers/AuthProvider";
 import { PostCard, FeedPost } from "@/components/PostCard";
 import { AppLayout } from "@/components/AppLayout";
@@ -8,6 +7,8 @@ import { Loader2, Sparkles, UserPlus } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
+import { api, fileUrl } from "@/lib/api";
+import { toast } from "sonner";
 
 const PAGE_SIZE = 10;
 
@@ -17,43 +18,22 @@ export default function Feed() {
   const [allPosts, setAllPosts] = useState<FeedPost[]>([]);
   const [hasMore, setHasMore] = useState(true);
 
-  const { data: followingIds = [] } = useQuery({
-    queryKey: ["following-ids", user?.id],
-    enabled: !!user,
-    queryFn: async () => {
-      const { data, error } = await supabase.from("follows").select("following_id").eq("follower_id", user!.id);
-      if (error) throw error;
-      return data.map((d) => d.following_id);
-    },
-  });
-
   const { data: posts, isLoading, isFetching } = useQuery({
-    queryKey: ["feed", user?.id, page, followingIds.length],
+    queryKey: ["feed", user?._id, page],
     enabled: !!user,
     queryFn: async () => {
-      const ids = [...followingIds, user!.id];
-      const { data, error } = await supabase
-        .from("posts")
-        .select("*, profiles:profiles!posts_user_id_fkey(username,display_name,avatar_url), likes(user_id), comments(id)")
-        .in("user_id", ids)
-        .order("created_at", { ascending: false })
-        .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
-      if (error) throw error;
-      return (data ?? []) as unknown as FeedPost[];
+      const { posts } = await api<{ posts: FeedPost[] }>(`/api/posts/feed?page=${page}&limit=${PAGE_SIZE}`);
+      return posts;
     },
   });
 
   useEffect(() => {
     if (!posts) return;
     if (page === 0) setAllPosts(posts);
-    else setAllPosts((prev) => [...prev, ...posts.filter((p) => !prev.find((x) => x.id === p.id))]);
+    else setAllPosts((prev) => [...prev, ...posts.filter((p) => !prev.find((x) => x._id === p._id))]);
     setHasMore(posts.length === PAGE_SIZE);
   }, [posts, page]);
 
-  // Reset on follow change
-  useEffect(() => { setPage(0); }, [followingIds.length]);
-
-  // Infinite scroll
   useEffect(() => {
     const onScroll = () => {
       if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 800 && hasMore && !isFetching) {
@@ -77,7 +57,7 @@ export default function Feed() {
           ) : allPosts.length === 0 ? (
             <EmptyFeed />
           ) : (
-            allPosts.map((p) => <PostCard key={p.id} post={p} />)
+            allPosts.map((p) => <PostCard key={p._id} post={p} />)
           )}
           {isFetching && page > 0 && (
             <div className="flex justify-center py-6"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>
@@ -104,24 +84,25 @@ const EmptyFeed = () => (
   </div>
 );
 
+interface SuggestedUser { _id: string; username: string; displayName?: string; profilePhoto?: string; }
+
 const Suggestions = () => {
   const { user } = useAuth();
-  const { data: suggestions = [] } = useQuery({
-    queryKey: ["suggestions", user?.id],
+  const { data: suggestions = [], refetch } = useQuery({
+    queryKey: ["suggestions", user?._id],
     enabled: !!user,
     queryFn: async () => {
-      const { data: follows } = await supabase.from("follows").select("following_id").eq("follower_id", user!.id);
-      const exclude = [user!.id, ...(follows?.map((f) => f.following_id) ?? [])];
-      const { data } = await supabase.from("profiles").select("id,username,display_name,avatar_url")
-        .not("id", "in", `(${exclude.join(",")})`).limit(5);
-      return data ?? [];
+      const { users } = await api<{ users: SuggestedUser[] }>("/api/users/suggestions");
+      return users;
     },
   });
 
   const follow = async (id: string) => {
-    if (!user) return;
-    await supabase.from("follows").insert({ follower_id: user.id, following_id: id });
-    await supabase.from("notifications").insert({ user_id: id, actor_id: user.id, type: "follow" });
+    try {
+      await api(`/api/users/${id}/follow`, { method: "POST" });
+      refetch();
+      toast.success("Followed");
+    } catch (e: any) { toast.error(e.message); }
   };
 
   return (
@@ -129,18 +110,18 @@ const Suggestions = () => {
       <h3 className="font-semibold text-sm text-muted-foreground uppercase tracking-wide">Suggested for you</h3>
       {suggestions.length === 0 && <p className="text-sm text-muted-foreground">No suggestions right now</p>}
       {suggestions.map((s) => (
-        <div key={s.id} className="flex items-center gap-3">
+        <div key={s._id} className="flex items-center gap-3">
           <Link to={`/u/${s.username}`} className="gradient-ring">
             <Avatar className="h-10 w-10 border-2 border-background">
-              <AvatarImage src={s.avatar_url ?? undefined} />
+              <AvatarImage src={fileUrl(s.profilePhoto)} />
               <AvatarFallback>{s.username[0]?.toUpperCase()}</AvatarFallback>
             </Avatar>
           </Link>
           <div className="flex-1 min-w-0">
             <Link to={`/u/${s.username}`} className="text-sm font-semibold truncate block hover:text-primary">@{s.username}</Link>
-            <p className="text-xs text-muted-foreground truncate">{s.display_name}</p>
+            <p className="text-xs text-muted-foreground truncate">{s.displayName}</p>
           </div>
-          <Button size="sm" variant="ghost" className="text-primary hover:text-primary-glow" onClick={() => follow(s.id)}>
+          <Button size="sm" variant="ghost" className="text-primary hover:text-primary-glow" onClick={() => follow(s._id)}>
             <UserPlus className="h-4 w-4 mr-1" /> Follow
           </Button>
         </div>

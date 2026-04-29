@@ -11,6 +11,14 @@ exports.getProfile = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+exports.getById = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id).select("username displayName profilePhoto bio");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json({ user });
+  } catch (err) { next(err); }
+};
+
 exports.updateProfile = async (req, res, next) => {
   try {
     const { displayName, bio, profilePhoto, isPrivate } = req.body;

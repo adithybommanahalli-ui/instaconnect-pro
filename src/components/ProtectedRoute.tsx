@@ -3,7 +3,7 @@ import { Navigate, useLocation } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 
 export const ProtectedRoute = ({ children }: { children: JSX.Element }) => {
-  const { session, loading } = useAuth();
+  const { user, loading } = useAuth();
   const location = useLocation();
   if (loading) {
     return (
@@ -12,6 +12,6 @@ export const ProtectedRoute = ({ children }: { children: JSX.Element }) => {
       </div>
     );
   }
-  if (!session) return <Navigate to="/auth" replace state={{ from: location }} />;
+  if (!user) return <Navigate to="/auth" replace state={{ from: location }} />;
   return children;
 };

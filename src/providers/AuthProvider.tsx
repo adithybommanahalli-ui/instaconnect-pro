@@ -1,40 +1,82 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { Session, User } from "@supabase/supabase-js";
-import { supabase } from "@/integrations/supabase/client";
+import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from "react";
+import { api, tokenStore } from "@/lib/api";
+import { disconnectSocket, getSocket } from "@/lib/socket";
+
+export interface AuthUser {
+  _id: string;
+  username: string;
+  email: string;
+  displayName?: string;
+  bio?: string;
+  profilePhoto?: string;
+  isPrivate?: boolean;
+  followers?: string[];
+  following?: string[];
+}
 
 interface AuthContextValue {
-  session: Session | null;
-  user: User | null;
+  user: AuthUser | null;
   loading: boolean;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (input: { username: string; email: string; password: string }) => Promise<void>;
   signOut: () => Promise<void>;
+  refresh: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue>({
-  session: null, user: null, loading: true, signOut: async () => {},
+  user: null,
+  loading: true,
+  signIn: async () => {},
+  signUp: async () => {},
+  signOut: async () => {},
+  refresh: async () => {},
 });
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    // Listener FIRST
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
-      setSession(s);
-      setLoading(false);
-    });
-    // Then existing session
-    supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSession(s);
-      setLoading(false);
-    });
-    return () => sub.subscription.unsubscribe();
+  const refresh = useCallback(async () => {
+    const token = tokenStore.get();
+    if (!token) { setUser(null); setLoading(false); return; }
+    try {
+      const { user } = await api<{ user: AuthUser }>("/api/auth/me");
+      setUser(user);
+      getSocket(); // open the socket once we know we're logged in
+    } catch {
+      tokenStore.clear();
+      setUser(null);
+    } finally { setLoading(false); }
   }, []);
 
-  const signOut = async () => { await supabase.auth.signOut(); };
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const signIn = async (email: string, password: string) => {
+    const { token, user } = await api<{ token: string; user: AuthUser }>("/api/auth/login", {
+      method: "POST", body: { email, password },
+    });
+    tokenStore.set(token);
+    setUser(user);
+    getSocket();
+  };
+
+  const signUp = async ({ username, email, password }: { username: string; email: string; password: string }) => {
+    const { token, user } = await api<{ token: string; user: AuthUser }>("/api/auth/register", {
+      method: "POST", body: { username, email, password, displayName: username },
+    });
+    tokenStore.set(token);
+    setUser(user);
+    getSocket();
+  };
+
+  const signOut = async () => {
+    tokenStore.clear();
+    disconnectSocket();
+    setUser(null);
+  };
 
   return (
-    <AuthContext.Provider value={{ session, user: session?.user ?? null, loading, signOut }}>
+    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut, refresh }}>
       {children}
     </AuthContext.Provider>
   );

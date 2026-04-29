@@ -4,73 +4,101 @@ import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Link } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/providers/AuthProvider";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { toast } from "sonner";
+import { api, fileUrl } from "@/lib/api";
 
+export interface PostUser {
+  _id: string;
+  username: string;
+  displayName?: string;
+  profilePhoto?: string;
+}
+export interface PostComment {
+  _id: string;
+  text: string;
+  createdAt: string;
+  user: PostUser | string;
+}
 export interface FeedPost {
-  id: string;
-  user_id: string;
-  image_url: string;
-  caption: string | null;
+  _id: string;
+  user: PostUser;
+  image: string;
+  caption: string;
   hashtags: string[];
-  created_at: string;
-  profiles: { username: string; display_name: string | null; avatar_url: string | null } | null;
-  likes: { user_id: string }[];
-  comments: { id: string }[];
+  likes: string[];
+  comments: PostComment[];
+  createdAt: string;
 }
 
-export const PostCard = ({ post }: { post: FeedPost }) => {
+export const PostCard = ({ post: initial }: { post: FeedPost }) => {
   const { user } = useAuth();
   const qc = useQueryClient();
-  const liked = post.likes.some((l) => l.user_id === user?.id);
+  const [post, setPost] = useState<FeedPost>(initial);
+  const liked = !!user && post.likes.includes(user._id);
   const likeCount = post.likes.length;
   const [showComments, setShowComments] = useState(false);
   const [commentText, setCommentText] = useState("");
   const [animating, setAnimating] = useState(false);
-  const isOwn = user?.id === post.user_id;
+  const isOwn = !!user && user._id === post.user._id;
 
   const toggleLike = async () => {
     if (!user) return;
     setAnimating(true); setTimeout(() => setAnimating(false), 400);
-    if (liked) {
-      await supabase.from("likes").delete().eq("post_id", post.id).eq("user_id", user.id);
-    } else {
-      const { error } = await supabase.from("likes").insert({ post_id: post.id, user_id: user.id });
-      if (!error && post.user_id !== user.id) {
-        await supabase.from("notifications").insert({
-          user_id: post.user_id, actor_id: user.id, type: "like", post_id: post.id,
-        });
-      }
+    // optimistic update
+    setPost((p) => ({
+      ...p,
+      likes: liked ? p.likes.filter((id) => id !== user._id) : [...p.likes, user._id],
+    }));
+    try {
+      await api(`/api/posts/${post._id}/like`, { method: "POST" });
+    } catch (e: any) {
+      toast.error(e.message);
+      // revert
+      setPost((p) => ({
+        ...p,
+        likes: liked ? [...p.likes, user._id] : p.likes.filter((id) => id !== user._id),
+      }));
     }
-    qc.invalidateQueries({ queryKey: ["feed"] });
-    qc.invalidateQueries({ queryKey: ["explore"] });
-    qc.invalidateQueries({ queryKey: ["user-posts"] });
   };
 
   const remove = async () => {
     if (!confirm("Delete this post?")) return;
-    const { error } = await supabase.from("posts").delete().eq("id", post.id);
-    if (error) toast.error(error.message);
-    else { toast.success("Deleted"); qc.invalidateQueries(); }
+    try {
+      await api(`/api/posts/${post._id}`, { method: "DELETE" });
+      toast.success("Deleted");
+      qc.invalidateQueries();
+    } catch (e: any) { toast.error(e.message); }
+  };
+
+  const submitComment = async () => {
+    if (!user || !commentText.trim()) return;
+    const text = commentText.trim().slice(0, 500);
+    setCommentText("");
+    try {
+      const { comments } = await api<{ comments: PostComment[] }>(`/api/posts/${post._id}/comments`, {
+        method: "POST", body: { text },
+      });
+      setPost((p) => ({ ...p, comments }));
+    } catch (e: any) { toast.error(e.message); }
   };
 
   return (
     <article className="glass-strong rounded-3xl overflow-hidden shadow-soft animate-fade-in">
       <header className="flex items-center gap-3 p-4">
-        <Link to={`/u/${post.profiles?.username}`} className="gradient-ring">
+        <Link to={`/u/${post.user.username}`} className="gradient-ring">
           <Avatar className="h-10 w-10 border-2 border-background">
-            <AvatarImage src={post.profiles?.avatar_url ?? undefined} />
-            <AvatarFallback className="bg-secondary">{post.profiles?.username?.[0]?.toUpperCase()}</AvatarFallback>
+            <AvatarImage src={fileUrl(post.user.profilePhoto)} />
+            <AvatarFallback className="bg-secondary">{post.user.username?.[0]?.toUpperCase()}</AvatarFallback>
           </Avatar>
         </Link>
         <div className="flex-1 min-w-0">
-          <Link to={`/u/${post.profiles?.username}`} className="font-semibold hover:text-primary transition-colors">
-            @{post.profiles?.username}
+          <Link to={`/u/${post.user.username}`} className="font-semibold hover:text-primary transition-colors">
+            @{post.user.username}
           </Link>
-          <p className="text-xs text-muted-foreground">{formatDistanceToNow(new Date(post.created_at), { addSuffix: true })}</p>
+          <p className="text-xs text-muted-foreground">{formatDistanceToNow(new Date(post.createdAt), { addSuffix: true })}</p>
         </div>
         {isOwn && (
           <Button size="icon" variant="ghost" onClick={remove} className="text-muted-foreground hover:text-destructive">
@@ -80,7 +108,7 @@ export const PostCard = ({ post }: { post: FeedPost }) => {
       </header>
 
       <div className="bg-black/20">
-        <img src={post.image_url} alt={post.caption ?? "post"} className="w-full max-h-[600px] object-contain" loading="lazy" />
+        <img src={fileUrl(post.image)} alt={post.caption ?? "post"} className="w-full max-h-[600px] object-contain" loading="lazy" />
       </div>
 
       <div className="p-4 space-y-3">
@@ -95,7 +123,7 @@ export const PostCard = ({ post }: { post: FeedPost }) => {
         <p className="text-sm font-semibold">{likeCount} {likeCount === 1 ? "like" : "likes"}</p>
         {post.caption && (
           <p className="text-sm">
-            <Link to={`/u/${post.profiles?.username}`} className="font-semibold mr-2">@{post.profiles?.username}</Link>
+            <Link to={`/u/${post.user.username}`} className="font-semibold mr-2">@{post.user.username}</Link>
             <CaptionWithTags text={post.caption} />
           </p>
         )}
@@ -105,37 +133,33 @@ export const PostCard = ({ post }: { post: FeedPost }) => {
           </button>
         )}
 
-        {showComments && <CommentsSection postId={post.id} postAuthorId={post.user_id} />}
+        {showComments && (
+          <div className="space-y-2 max-h-60 overflow-y-auto pr-1 scrollbar-hide">
+            {post.comments.map((c) => {
+              const cu = typeof c.user === "string" ? null : c.user;
+              return (
+                <div key={c._id} className="flex items-start gap-2">
+                  <Avatar className="h-7 w-7">
+                    <AvatarImage src={fileUrl(cu?.profilePhoto)} />
+                    <AvatarFallback className="text-xs">{cu?.username?.[0]?.toUpperCase()}</AvatarFallback>
+                  </Avatar>
+                  <div className="flex-1 text-sm">
+                    {cu ? (
+                      <Link to={`/u/${cu.username}`} className="font-semibold mr-2">@{cu.username}</Link>
+                    ) : null}
+                    <span>{c.text}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         <div className="flex items-center gap-2 pt-2 border-t border-border/40">
           <Input value={commentText} onChange={(e) => setCommentText(e.target.value)} placeholder="Add a comment…"
             className="border-0 bg-transparent focus-visible:ring-0 px-0"
-            onKeyDown={async (e) => {
-              if (e.key === "Enter" && commentText.trim() && user) {
-                const text = commentText.trim().slice(0, 500);
-                setCommentText("");
-                const { error } = await supabase.from("comments").insert({ post_id: post.id, user_id: user.id, content: text });
-                if (!error && post.user_id !== user.id) {
-                  await supabase.from("notifications").insert({
-                    user_id: post.user_id, actor_id: user.id, type: "comment", post_id: post.id,
-                  });
-                }
-                qc.invalidateQueries();
-              }
-            }} />
-          <Button size="icon" variant="ghost" disabled={!commentText.trim()}
-            onClick={async () => {
-              if (!user || !commentText.trim()) return;
-              const text = commentText.trim().slice(0, 500);
-              setCommentText("");
-              const { error } = await supabase.from("comments").insert({ post_id: post.id, user_id: user.id, content: text });
-              if (!error && post.user_id !== user.id) {
-                await supabase.from("notifications").insert({
-                  user_id: post.user_id, actor_id: user.id, type: "comment", post_id: post.id,
-                });
-              }
-              qc.invalidateQueries();
-            }}>
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submitComment(); } }} />
+          <Button size="icon" variant="ghost" disabled={!commentText.trim()} onClick={submitComment}>
             <Send className="h-4 w-4 text-primary" />
           </Button>
         </div>
@@ -156,44 +180,5 @@ const CaptionWithTags = ({ text }: { text: string }) => {
         )
       )}
     </>
-  );
-};
-
-const CommentsSection = ({ postId, postAuthorId }: { postId: string; postAuthorId: string }) => {
-  const { user } = useAuth();
-  const qc = useQueryClient();
-  const { data: comments = [] } = useQuery({
-    queryKey: ["comments", postId],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("comments")
-        .select("id,content,created_at,user_id, profiles:profiles!comments_user_id_fkey(username,avatar_url)")
-        .eq("post_id", postId)
-        .order("created_at", { ascending: true });
-      if (error) throw error;
-      return data ?? [];
-    },
-  });
-
-  return (
-    <div className="space-y-2 max-h-60 overflow-y-auto pr-1 scrollbar-hide">
-      {comments.map((c: any) => (
-        <div key={c.id} className="flex items-start gap-2 group">
-          <Avatar className="h-7 w-7"><AvatarImage src={c.profiles?.avatar_url ?? undefined} />
-            <AvatarFallback className="text-xs">{c.profiles?.username?.[0]?.toUpperCase()}</AvatarFallback>
-          </Avatar>
-          <div className="flex-1 text-sm">
-            <Link to={`/u/${c.profiles?.username}`} className="font-semibold mr-2">@{c.profiles?.username}</Link>
-            <span>{c.content}</span>
-          </div>
-          {(user?.id === c.user_id || user?.id === postAuthorId) && (
-            <Button size="icon" variant="ghost" className="opacity-0 group-hover:opacity-100 h-7 w-7"
-              onClick={async () => { await supabase.from("comments").delete().eq("id", c.id); qc.invalidateQueries(); }}>
-              <Trash2 className="h-3 w-3" />
-            </Button>
-          )}
-        </div>
-      ))}
-    </div>
   );
 };
