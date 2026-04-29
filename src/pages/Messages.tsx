@@ -1,6 +1,5 @@
 import { AppLayout } from "@/components/AppLayout";
 import { useAuth } from "@/providers/AuthProvider";
-import { supabase } from "@/integrations/supabase/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -9,14 +8,26 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Send, Loader2, Check, CheckCheck, ArrowLeft } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
+import { api, fileUrl } from "@/lib/api";
+import { getSocket } from "@/lib/socket";
 
 interface Conversation {
-  other_id: string;
+  otherId: string;
   username: string;
-  avatar_url: string | null;
-  last_content: string;
-  last_at: string;
+  displayName?: string;
+  profilePhoto?: string;
+  lastContent: string;
+  lastAt: string;
   unread: number;
+}
+
+interface Message {
+  _id: string;
+  sender: string;
+  receiver: string;
+  content: string;
+  status: "sent" | "delivered" | "read";
+  createdAt: string;
 }
 
 export default function Messages() {
@@ -26,47 +37,27 @@ export default function Messages() {
   const qc = useQueryClient();
 
   const { data: conversations = [] } = useQuery<Conversation[]>({
-    queryKey: ["conversations", user?.id],
+    queryKey: ["conversations", user?._id],
     enabled: !!user,
     queryFn: async () => {
-      const { data: msgs, error } = await supabase
-        .from("messages")
-        .select("id,sender_id,recipient_id,content,read_at,created_at")
-        .or(`sender_id.eq.${user!.id},recipient_id.eq.${user!.id}`)
-        .order("created_at", { ascending: false })
-        .limit(500);
-      if (error) throw error;
-      const map = new Map<string, Conversation>();
-      for (const m of msgs ?? []) {
-        const other = m.sender_id === user!.id ? m.recipient_id : m.sender_id;
-        if (!map.has(other)) {
-          map.set(other, {
-            other_id: other, username: "", avatar_url: null,
-            last_content: m.content, last_at: m.created_at, unread: 0,
-          });
-        }
-        const c = map.get(other)!;
-        if (m.recipient_id === user!.id && !m.read_at) c.unread++;
-      }
-      const ids = [...map.keys()];
-      if (ids.length === 0) return [];
-      const { data: profs } = await supabase.from("profiles").select("id,username,avatar_url").in("id", ids);
-      for (const p of profs ?? []) {
-        const c = map.get(p.id);
-        if (c) { c.username = p.username; c.avatar_url = p.avatar_url; }
-      }
-      return [...map.values()].sort((a, b) => b.last_at.localeCompare(a.last_at));
+      const { conversations } = await api<{ conversations: Conversation[] }>("/api/messages");
+      return conversations;
     },
+    refetchInterval: 15000,
   });
 
-  // Realtime conversations refresh
+  // Refresh conversation list on any incoming message
   useEffect(() => {
     if (!user) return;
-    const ch = supabase.channel("conv-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => {
-        qc.invalidateQueries({ queryKey: ["conversations"] });
-      }).subscribe();
-    return () => { supabase.removeChannel(ch); };
+    const socket = getSocket();
+    if (!socket) return;
+    const refresh = () => qc.invalidateQueries({ queryKey: ["conversations"] });
+    socket.on("message:new", refresh);
+    socket.on("message:read", refresh);
+    return () => {
+      socket.off("message:new", refresh);
+      socket.off("message:read", refresh);
+    };
   }, [user, qc]);
 
   return (
@@ -79,14 +70,14 @@ export default function Messages() {
               <p className="text-sm text-muted-foreground text-center py-8">No conversations yet. Start one from a profile.</p>
             )}
             {conversations.map((c) => (
-              <button key={c.other_id} onClick={() => navigate(`/messages/${c.other_id}`)}
-                className={`w-full flex items-center gap-3 p-3 rounded-2xl hover:bg-secondary/50 transition-colors text-left ${otherId === c.other_id ? "bg-secondary/70" : ""}`}>
-                <Avatar><AvatarImage src={c.avatar_url ?? undefined} />
-                  <AvatarFallback>{c.username[0]?.toUpperCase()}</AvatarFallback>
+              <button key={c.otherId} onClick={() => navigate(`/messages/${c.otherId}`)}
+                className={`w-full flex items-center gap-3 p-3 rounded-2xl hover:bg-secondary/50 transition-colors text-left ${otherId === c.otherId ? "bg-secondary/70" : ""}`}>
+                <Avatar><AvatarImage src={fileUrl(c.profilePhoto)} />
+                  <AvatarFallback>{c.username?.[0]?.toUpperCase()}</AvatarFallback>
                 </Avatar>
                 <div className="flex-1 min-w-0">
                   <p className="font-semibold text-sm truncate">@{c.username}</p>
-                  <p className="text-xs text-muted-foreground truncate">{c.last_content}</p>
+                  <p className="text-xs text-muted-foreground truncate">{c.lastContent}</p>
                 </div>
                 {c.unread > 0 && <span className="bg-primary text-primary-foreground text-xs rounded-full px-2 py-0.5 font-semibold">{c.unread}</span>}
               </button>
@@ -111,83 +102,104 @@ const ChatPane = ({ otherId, onBack }: { otherId: string; onBack: () => void }) 
   const qc = useQueryClient();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
 
   const { data: other } = useQuery({
     queryKey: ["profile-by-id", otherId],
-    queryFn: async () => (await supabase.from("profiles").select("id,username,avatar_url").eq("id", otherId).maybeSingle()).data,
-  });
-
-  const { data: messages = [] } = useQuery({
-    queryKey: ["thread", user?.id, otherId],
-    enabled: !!user,
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("messages")
-        .select("*")
-        .or(`and(sender_id.eq.${user!.id},recipient_id.eq.${otherId}),and(sender_id.eq.${otherId},recipient_id.eq.${user!.id})`)
-        .order("created_at", { ascending: true })
-        .limit(500);
-      if (error) throw error;
-      return data ?? [];
+      const { user } = await api<{ user: any }>(`/api/users/id/${otherId}`);
+      return user;
     },
   });
 
+  const { data: initialMessages } = useQuery({
+    queryKey: ["thread", user?._id, otherId],
+    enabled: !!user,
+    queryFn: async () => {
+      const { messages } = await api<{ messages: Message[] }>(`/api/messages/${otherId}`);
+      return messages;
+    },
+  });
+
+  useEffect(() => { if (initialMessages) setMessages(initialMessages); }, [initialMessages]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages.length]);
 
-  // Mark received as read
+  // Tell the server we've read this thread
   useEffect(() => {
     if (!user) return;
-    const unreadIds = messages.filter((m: any) => m.recipient_id === user.id && !m.read_at).map((m: any) => m.id);
-    if (unreadIds.length > 0) {
-      supabase.from("messages").update({ read_at: new Date().toISOString() }).in("id", unreadIds).then(() => {
-        qc.invalidateQueries({ queryKey: ["conversations"] });
-      });
-    }
-  }, [messages, user, qc]);
+    const socket = getSocket();
+    if (!socket) return;
+    socket.emit("message:read", { from: otherId });
+    qc.invalidateQueries({ queryKey: ["conversations"] });
+  }, [user, otherId, qc, messages.length]);
 
-  // Realtime thread
+  // Live updates
   useEffect(() => {
     if (!user) return;
-    const ch = supabase.channel(`thread-${otherId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, (payload) => {
-        const m: any = payload.new ?? payload.old;
-        if (!m) return;
-        const involved = (m.sender_id === user.id && m.recipient_id === otherId) ||
-                         (m.sender_id === otherId && m.recipient_id === user.id);
-        if (involved) qc.invalidateQueries({ queryKey: ["thread", user.id, otherId] });
-      }).subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [user, otherId, qc]);
+    const socket = getSocket();
+    if (!socket) return;
+    const onNew = (m: Message) => {
+      const involved =
+        (m.sender === user._id && m.receiver === otherId) ||
+        (m.sender === otherId && m.receiver === user._id);
+      if (involved) setMessages((prev) => prev.find((x) => x._id === m._id) ? prev : [...prev, m]);
+    };
+    const onRead = ({ by }: { by: string }) => {
+      if (by !== otherId) return;
+      setMessages((prev) => prev.map((m) => (m.sender === user._id ? { ...m, status: "read" } : m)));
+    };
+    socket.on("message:new", onNew);
+    socket.on("message:sent", onNew);
+    socket.on("message:read", onRead);
+    return () => {
+      socket.off("message:new", onNew);
+      socket.off("message:sent", onNew);
+      socket.off("message:read", onRead);
+    };
+  }, [user, otherId]);
 
   const send = async () => {
     if (!user || !text.trim()) return;
     setSending(true);
     const content = text.trim().slice(0, 2000);
     setText("");
-    const { error } = await supabase.from("messages").insert({ sender_id: user.id, recipient_id: otherId, content });
-    setSending(false);
-    if (error) console.error(error);
+    try {
+      const socket = getSocket();
+      if (socket && socket.connected) {
+        socket.emit("message:send", { receiver: otherId, content }, (ack: any) => {
+          if (ack?.ok && ack.message) {
+            setMessages((prev) => prev.find((x) => x._id === ack.message._id) ? prev : [...prev, ack.message]);
+          }
+        });
+      } else {
+        const { message } = await api<{ message: Message }>("/api/messages", {
+          method: "POST", body: { receiver: otherId, content },
+        });
+        setMessages((prev) => [...prev, message]);
+      }
+    } catch (e) { console.error(e); }
+    finally { setSending(false); }
   };
 
   return (
     <>
       <div className="flex items-center gap-3 p-4 border-b border-border/40">
         <Button variant="ghost" size="icon" className="md:hidden" onClick={onBack}><ArrowLeft className="h-5 w-5" /></Button>
-        <Avatar><AvatarImage src={other?.avatar_url ?? undefined} /><AvatarFallback>{other?.username?.[0]?.toUpperCase()}</AvatarFallback></Avatar>
+        <Avatar><AvatarImage src={fileUrl(other?.profilePhoto)} /><AvatarFallback>{other?.username?.[0]?.toUpperCase()}</AvatarFallback></Avatar>
         <div><p className="font-semibold">@{other?.username}</p></div>
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-2">
         {messages.length === 0 && <p className="text-center text-muted-foreground py-12 text-sm">Send the first message ✨</p>}
-        {messages.map((m: any) => {
-          const own = m.sender_id === user?.id;
+        {messages.map((m) => {
+          const own = m.sender === user?._id;
           return (
-            <div key={m.id} className={`flex ${own ? "justify-end" : "justify-start"} animate-fade-in`}>
+            <div key={m._id} className={`flex ${own ? "justify-end" : "justify-start"} animate-fade-in`}>
               <div className={`max-w-[75%] px-4 py-2 rounded-2xl ${own ? "bg-gradient-primary text-primary-foreground rounded-br-sm" : "glass rounded-bl-sm"}`}>
                 <p className="text-sm whitespace-pre-wrap break-words">{m.content}</p>
                 <div className={`text-[10px] mt-1 flex items-center gap-1 ${own ? "text-primary-foreground/80 justify-end" : "text-muted-foreground"}`}>
-                  {formatDistanceToNow(new Date(m.created_at), { addSuffix: true })}
-                  {own && (m.read_at ? <CheckCheck className="h-3 w-3" /> : <Check className="h-3 w-3" />)}
+                  {formatDistanceToNow(new Date(m.createdAt), { addSuffix: true })}
+                  {own && (m.status === "read" ? <CheckCheck className="h-3 w-3" /> : <Check className="h-3 w-3" />)}
                 </div>
               </div>
             </div>

@@ -3,9 +3,10 @@ import { Home, Search, PlusSquare, MessageCircle, Heart, User, LogOut, Compass }
 import { Logo } from "./Logo";
 import { Button } from "./ui/button";
 import { useAuth } from "@/providers/AuthProvider";
-import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { useEffect, useState, useCallback } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
+import { api, fileUrl } from "@/lib/api";
+import { getSocket } from "@/lib/socket";
 
 interface NavItem { to: string; icon: any; label: string; badge?: number }
 
@@ -15,27 +16,33 @@ export const Sidebar = ({ onCreate }: { onCreate: () => void }) => {
   const { pathname } = useLocation();
   const [unread, setUnread] = useState(0);
   const [unreadMsg, setUnreadMsg] = useState(0);
-  const [profile, setProfile] = useState<{ username: string; avatar_url: string | null } | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!user) return;
+    try {
+      const [{ notifications }, { conversations }] = await Promise.all([
+        api<{ notifications: any[] }>("/api/notifications"),
+        api<{ conversations: any[] }>("/api/messages"),
+      ]);
+      setUnread(notifications.filter((n) => !n.seen).length);
+      setUnreadMsg(conversations.reduce((sum, c) => sum + (c.unread || 0), 0));
+    } catch { /* server may be offline */ }
+  }, [user]);
 
   useEffect(() => {
-    if (!user) return;
-    const load = async () => {
-      const [{ data: p }, { count: n }, { count: m }] = await Promise.all([
-        supabase.from("profiles").select("username,avatar_url").eq("id", user.id).maybeSingle(),
-        supabase.from("notifications").select("*", { count: "exact", head: true }).eq("user_id", user.id).is("read_at", null),
-        supabase.from("messages").select("*", { count: "exact", head: true }).eq("recipient_id", user.id).is("read_at", null),
-      ]);
-      if (p) setProfile(p as any);
-      setUnread(n ?? 0);
-      setUnreadMsg(m ?? 0);
+    refresh();
+    const socket = getSocket();
+    if (!socket) return;
+    const onNew = () => refresh();
+    socket.on("message:new", onNew);
+    socket.on("message:read", onNew);
+    const interval = setInterval(refresh, 20000);
+    return () => {
+      socket.off("message:new", onNew);
+      socket.off("message:read", onNew);
+      clearInterval(interval);
     };
-    load();
-    const ch = supabase.channel("sidebar-counts")
-      .on("postgres_changes", { event: "*", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "messages", filter: `recipient_id=eq.${user.id}` }, load)
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [user]);
+  }, [refresh]);
 
   const items: NavItem[] = [
     { to: "/", icon: Home, label: "Feed" },
@@ -43,7 +50,7 @@ export const Sidebar = ({ onCreate }: { onCreate: () => void }) => {
     { to: "/search", icon: Search, label: "Search" },
     { to: "/messages", icon: MessageCircle, label: "Messages", badge: unreadMsg },
     { to: "/notifications", icon: Heart, label: "Notifications", badge: unread },
-    { to: `/u/${profile?.username ?? ""}`, icon: User, label: "Profile" },
+    { to: `/u/${user?.username ?? ""}`, icon: User, label: "Profile" },
   ];
 
   return (
@@ -75,13 +82,13 @@ export const Sidebar = ({ onCreate }: { onCreate: () => void }) => {
 
       <div className="mt-auto glass rounded-2xl p-3 flex items-center gap-3">
         <Avatar className="h-10 w-10 ring-2 ring-primary/40">
-          <AvatarImage src={profile?.avatar_url ?? undefined} />
+          <AvatarImage src={fileUrl(user?.profilePhoto)} />
           <AvatarFallback className="bg-gradient-primary text-primary-foreground">
-            {profile?.username?.[0]?.toUpperCase() ?? "U"}
+            {user?.username?.[0]?.toUpperCase() ?? "U"}
           </AvatarFallback>
         </Avatar>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold truncate">@{profile?.username}</p>
+          <p className="text-sm font-semibold truncate">@{user?.username}</p>
           <p className="text-xs text-muted-foreground truncate">{user?.email}</p>
         </div>
         <Button size="icon" variant="ghost" onClick={async () => { await signOut(); navigate("/auth"); }} title="Sign out">

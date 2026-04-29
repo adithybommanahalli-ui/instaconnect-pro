@@ -2,11 +2,11 @@ import { useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/providers/AuthProvider";
 import { toast } from "sonner";
 import { Loader2, Upload, X } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
+import { api } from "@/lib/api";
 
 export const CreatePostDialog = ({ open, onOpenChange }: { open: boolean; onOpenChange: (b: boolean) => void }) => {
   const { user } = useAuth();
@@ -31,16 +31,10 @@ export const CreatePostDialog = ({ open, onOpenChange }: { open: boolean; onOpen
     if (caption.length > 2000) { toast.error("Caption too long"); return; }
     setSubmitting(true);
     try {
-      const ext = file.name.split(".").pop() ?? "jpg";
-      const path = `${user.id}/${Date.now()}.${ext}`;
-      const up = await supabase.storage.from("post-images").upload(path, file, { contentType: file.type });
-      if (up.error) throw up.error;
-      const { data: pub } = supabase.storage.from("post-images").getPublicUrl(path);
-      const tags = Array.from(caption.matchAll(/#(\w+)/g)).map((m) => m[1].toLowerCase());
-      const ins = await supabase.from("posts").insert({
-        user_id: user.id, image_url: pub.publicUrl, caption, hashtags: tags,
-      });
-      if (ins.error) throw ins.error;
+      const fd = new FormData();
+      fd.append("image", file);
+      fd.append("caption", caption);
+      await api("/api/posts", { method: "POST", body: fd, form: true });
       toast.success("Post shared!");
       qc.invalidateQueries();
       reset();

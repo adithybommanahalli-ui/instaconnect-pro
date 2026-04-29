@@ -1,19 +1,16 @@
 import { AppLayout } from "@/components/AppLayout";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
 import { Hash } from "lucide-react";
+import { api, fileUrl } from "@/lib/api";
 
 export default function Hashtag() {
   const { tag = "" } = useParams();
   const { data: posts = [] } = useQuery({
     queryKey: ["tag", tag],
     queryFn: async () => {
-      const { data } = await supabase.from("posts")
-        .select("id,image_url,profiles:profiles!posts_user_id_fkey(username)")
-        .contains("hashtags", [tag.toLowerCase()])
-        .order("created_at", { ascending: false }).limit(60);
-      return data ?? [];
+      const { posts } = await api<{ posts: any[] }>(`/api/posts/hashtag/${encodeURIComponent(tag.toLowerCase())}`);
+      return posts;
     },
   });
 
@@ -32,8 +29,8 @@ export default function Hashtag() {
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 gap-1 md:gap-3">
             {posts.map((p: any) => (
-              <Link key={p.id} to={`/u/${p.profiles?.username}`} className="aspect-square rounded-2xl overflow-hidden">
-                <img src={p.image_url} alt="" loading="lazy" className="w-full h-full object-cover hover:scale-105 transition-transform" />
+              <Link key={p._id} to={`/u/${p.user?.username}`} className="aspect-square rounded-2xl overflow-hidden">
+                <img src={fileUrl(p.image)} alt="" loading="lazy" className="w-full h-full object-cover hover:scale-105 transition-transform" />
               </Link>
             ))}
           </div>
