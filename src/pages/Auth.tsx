@@ -48,7 +48,11 @@ export default function Auth() {
     if (!parsed.success) { toast.error(parsed.error.issues[0].message); return; }
     setLoading(true);
     try {
-      await signUp(parsed.data);
+      await signUp({
+        username: parsed.data.username!,
+        email: parsed.data.email!,
+        password: parsed.data.password!,
+      });
       toast.success("Account created — welcome to GMinsta!");
       navigate("/", { replace: true });
     } catch (err: any) { toast.error(err.message || "Sign up failed"); }
