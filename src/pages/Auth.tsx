@@ -1,7 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { z } from "zod";
-import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,7 +9,6 @@ import { Logo } from "@/components/Logo";
 import { toast } from "sonner";
 import { Loader2, Mail, Lock, AtSign } from "lucide-react";
 import { useAuth } from "@/providers/AuthProvider";
-import { useEffect } from "react";
 
 const signUpSchema = z.object({
   email: z.string().trim().email("Invalid email").max(255),
@@ -24,47 +22,41 @@ const signInSchema = z.object({
 
 export default function Auth() {
   const navigate = useNavigate();
-  const { session } = useAuth();
+  const { user, signIn, signUp } = useAuth();
   const [loading, setLoading] = useState(false);
-  const [signIn, setSignIn] = useState({ email: "", password: "" });
-  const [signUp, setSignUp] = useState({ email: "", password: "", username: "" });
+  const [siForm, setSiForm] = useState({ email: "", password: "" });
+  const [suForm, setSuForm] = useState({ email: "", password: "", username: "" });
 
-  useEffect(() => { if (session) navigate("/", { replace: true }); }, [session, navigate]);
+  useEffect(() => { if (user) navigate("/", { replace: true }); }, [user, navigate]);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
-    const parsed = signInSchema.safeParse(signIn);
+    const parsed = signInSchema.safeParse(siForm);
     if (!parsed.success) { toast.error(parsed.error.issues[0].message); return; }
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email: parsed.data.email, password: parsed.data.password });
-    setLoading(false);
-    if (error) toast.error(error.message);
-    else { toast.success("Welcome back!"); navigate("/", { replace: true }); }
+    try {
+      await signIn(parsed.data.email, parsed.data.password);
+      toast.success("Welcome back!");
+      navigate("/", { replace: true });
+    } catch (err: any) { toast.error(err.message || "Sign in failed"); }
+    finally { setLoading(false); }
   };
 
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
-    const parsed = signUpSchema.safeParse(signUp);
+    const parsed = signUpSchema.safeParse(suForm);
     if (!parsed.success) { toast.error(parsed.error.issues[0].message); return; }
     setLoading(true);
-    const { error } = await supabase.auth.signUp({
-      email: parsed.data.email,
-      password: parsed.data.password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/`,
-        data: { username: parsed.data.username, display_name: parsed.data.username },
-      },
-    });
-    setLoading(false);
-    if (error) {
-      if (error.message.toLowerCase().includes("registered")) toast.error("Email already in use");
-      else toast.error(error.message);
-    } else { toast.success("Account created — welcome to GMinsta!"); navigate("/", { replace: true }); }
+    try {
+      await signUp(parsed.data);
+      toast.success("Account created — welcome to GMinsta!");
+      navigate("/", { replace: true });
+    } catch (err: any) { toast.error(err.message || "Sign up failed"); }
+    finally { setLoading(false); }
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
-      {/* Floating glow orbs */}
       <div className="absolute -top-32 -left-32 w-96 h-96 rounded-full bg-primary/30 blur-3xl animate-float" />
       <div className="absolute -bottom-32 -right-32 w-96 h-96 rounded-full bg-accent/30 blur-3xl animate-float" style={{ animationDelay: "2s" }} />
 
@@ -85,7 +77,7 @@ export default function Auth() {
                 <div className="relative">
                   <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input id="si-email" type="email" placeholder="you@example.com" className="pl-10"
-                    value={signIn.email} onChange={(e) => setSignIn({ ...signIn, email: e.target.value })} />
+                    value={siForm.email} onChange={(e) => setSiForm({ ...siForm, email: e.target.value })} />
                 </div>
               </div>
               <div className="space-y-2">
@@ -93,7 +85,7 @@ export default function Auth() {
                 <div className="relative">
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input id="si-pw" type="password" placeholder="••••••••" className="pl-10"
-                    value={signIn.password} onChange={(e) => setSignIn({ ...signIn, password: e.target.value })} />
+                    value={siForm.password} onChange={(e) => setSiForm({ ...siForm, password: e.target.value })} />
                 </div>
               </div>
               <Button type="submit" disabled={loading} className="w-full bg-gradient-primary hover:opacity-90 py-6 rounded-xl shadow-elegant">
@@ -109,7 +101,7 @@ export default function Auth() {
                 <div className="relative">
                   <AtSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input id="su-user" placeholder="yourname" className="pl-10"
-                    value={signUp.username} onChange={(e) => setSignUp({ ...signUp, username: e.target.value.toLowerCase() })} />
+                    value={suForm.username} onChange={(e) => setSuForm({ ...suForm, username: e.target.value.toLowerCase() })} />
                 </div>
               </div>
               <div className="space-y-2">
@@ -117,7 +109,7 @@ export default function Auth() {
                 <div className="relative">
                   <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input id="su-email" type="email" placeholder="you@example.com" className="pl-10"
-                    value={signUp.email} onChange={(e) => setSignUp({ ...signUp, email: e.target.value })} />
+                    value={suForm.email} onChange={(e) => setSuForm({ ...suForm, email: e.target.value })} />
                 </div>
               </div>
               <div className="space-y-2">
@@ -125,7 +117,7 @@ export default function Auth() {
                 <div className="relative">
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input id="su-pw" type="password" placeholder="At least 6 characters" className="pl-10"
-                    value={signUp.password} onChange={(e) => setSignUp({ ...signUp, password: e.target.value })} />
+                    value={suForm.password} onChange={(e) => setSuForm({ ...suForm, password: e.target.value })} />
                 </div>
               </div>
               <Button type="submit" disabled={loading} className="w-full bg-gradient-primary hover:opacity-90 py-6 rounded-xl shadow-elegant">
